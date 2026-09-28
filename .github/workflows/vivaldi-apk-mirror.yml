@@ -114,6 +114,11 @@ jobs:
           # ||access.pikpak.me^$all
           # ||access.pikpakdrive.com^$all
 
+          # pikpak
+          # t.h.eoba.l.d2.7.9.8@gmail.com
+          # washbromai191+cartwright@gmail.com
+          # JwwR$&w%7Pd6f71N
+
       - name: Skip if asset with same name already exists
         id: check
         env:
