@@ -1,0 +1,147 @@
+name: Mirror Vivaldi Android APK (arm64)
+
+on:
+  schedule:
+    # 每月 1 日 03:17 UTC（北京时间 11:17）运行一次
+    - cron: '17 3 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vivaldi-apk-mirror
+  cancel-in-progress: false
+
+env:
+  # Release 标签，不存在时自动创建
+  TAG: v1.0
+  # 用于解析最新 APK 直链的官方页面（按序尝试，空格分隔）
+  DOWNLOAD_PAGES: https://vivaldi.com/download/ https://vivaldi.com/android/
+  # 官方 CDN 上 arm64 架构 APK 的直链正则（文件名形如 Vivaldi.8.2.4147.93_arm64-v8a.apk）
+  APK_PATTERN: 'https://downloads\.vivaldi\.com/stable/Vivaldi\.[0-9][0-9.]*_arm64-v8a\.apk'
+  # 兜底来源：官方博客 RSS 中 Android 更新公告里的备用下载链接
+  BLOG_FEED: https://vivaldi.com/blog/feed/
+  UA: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
+  DOWNLOAD_DIR: apk
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  mirror:
+    name: Download and publish Vivaldi arm64 APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve latest arm64 APK URL
+        id: resolve
+        run: |
+          set -euo pipefail
+          url=""
+          for page in $DOWNLOAD_PAGES; do
+            echo "Scanning $page"
+            found=$(curl -fsSL --compressed --max-time 60 --retry 3 --retry-delay 5 \
+                      -A "$UA" "$page" | grep -oE "$APK_PATTERN" | sort -uV | tail -n 1 || true)
+            if [ -n "$found" ]; then url="$found"; break; fi
+          done
+          if [ -z "$url" ]; then
+            echo "Falling back to blog feed: $BLOG_FEED"
+            found=$(curl -fsSL --compressed --max-time 60 --retry 3 --retry-delay 5 \
+                      -A "$UA" "$BLOG_FEED" | grep -oE "$APK_PATTERN" | sort -uV | tail -n 1 || true)
+            url="${found:-}"
+          fi
+          if [ -z "$url" ]; then
+            echo "::error::未能从官方页面解析出 arm64-v8a APK 直链"
+            exit 1
+          fi
+          echo "Resolved: $url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "name=${url##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Download APK from official CDN (keep original filename)
+        id: download
+        env:
+          APK_URL: ${{ steps.resolve.outputs.url }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOWNLOAD_DIR"
+          cd "$DOWNLOAD_DIR"
+          # -O：直接用 CDN 上的原始文件名保存，不做任何重命名
+          curl -fL --compressed --max-time 1800 --retry 5 --retry-delay 10 --retry-all-errors \
+               -A "$UA" -O "$APK_URL"
+          file="${APK_URL##*/}"
+          if [ ! -s "$file" ]; then
+            echo "::error::下载失败或文件为空: $file"
+            exit 1
+          fi
+          # 完整性校验：APK 本质是 zip，必须能列出 AndroidManifest.xml
+          if ! unzip -l "$file" | grep -q 'AndroidManifest.xml'; then
+            echo "::error::文件不是有效的 APK: $file"
+            exit 1
+          fi
+          echo "Downloaded: $file ($(du -h "$file" | cut -f1))"
+          echo "sha256: $(sha256sum "$file" | cut -d' ' -f1)"
+          echo "name=$file" >> "$GITHUB_OUTPUT"
+          echo "path=$DOWNLOAD_DIR/$file" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure release tag exists
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+          else
+            gh release create "$TAG" \
+              --title "Vivaldi Android APK (arm64)" \
+              --notes "Vivaldi Android arm64-v8a APK 镜像，由 GitHub Actions 每月自动同步。"
+            echo "Release $TAG created"
+            echo "created=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if asset with same name already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APK_NAME: ${{ steps.download.outputs.name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json assets --jq '.assets[].name' \
+             | grep -Fxq "$APK_NAME"; then
+            echo "::notice::Release $TAG 中已存在同名文件 $APK_NAME，跳过上传"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No duplicate found for $APK_NAME"
+            echo "skipped=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload APK to release
+        if: steps.check.outputs.skipped == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APK_PATH: ${{ steps.download.outputs.path }}
+          APK_NAME: ${{ steps.download.outputs.name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" "$APK_PATH"
+          echo "::notice::已上传 $APK_NAME 到 release $TAG"
+
+      - name: Summary
+        env:
+          APK_NAME: ${{ steps.download.outputs.name }}
+          APK_URL: ${{ steps.resolve.outputs.url }}
+          SKIPPED: ${{ steps.check.outputs.skipped }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Vivaldi Android APK 同步结果"
+            echo ""
+            echo "- 文件: \`$APK_NAME\`"
+            echo "- 来源: $APK_URL"
+            echo "- Release: \`$TAG\`"
+            if [ "$SKIPPED" = "true" ]; then
+              echo "- 状态: 已存在同名文件，跳过上传"
+            else
+              echo "- 状态: 已上传"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
