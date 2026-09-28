@@ -1,0 +1,65 @@
+name: Keep Repo Active
+
+on:
+  schedule:
+    # 每周一 UTC 02:23（北京时间 10:23）；避开整点，GitHub 高峰期会排队
+    - cron: "23 2 * * 1"
+  workflow_dispatch:   # 允许手动点一次，用来激活或补救
+
+permissions:
+  contents: write      # 关键：默认 GITHUB_TOKEN 只读，必须显式开写权限
+
+concurrency:
+  group: keep-repo-active
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 拉全量历史，后面 rebase 才不会失败
+
+      - name: Write heartbeat record
+        run: |
+          set -euo pipefail
+          export TZ=Asia/Shanghai
+          mkdir -p .github/activity
+          TS=$(date '+%Y-%m-%d %H:%M:%S %Z')
+          LOG=.github/activity/heartbeat.log
+
+          printf '%s | run #%s\n' "$TS" "$GITHUB_RUN_NUMBER" >> "$LOG"
+          # 只留最近 60 行，防止文件无限膨胀
+          tail -n 60 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+          printf '%s\n' "$TS" > .github/activity/last-active.txt
+
+      - name: Commit & push
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/activity
+          if git diff --cached --quiet; then
+            echo "无变更，跳过提交"
+            exit 0
+          fi
+
+          export TZ=Asia/Shanghai
+          git commit -m "chore(heartbeat): $(date '+%Y-%m-%d')"
+
+          # 并发/冲突保护：失败就 rebase 后重试，最多 5 次
+          for i in 1 2 3 4 5; do
+            if git pull --rebase --autostash origin "$BRANCH" \
+               && git push origin "HEAD:$BRANCH"; then
+              echo "第 $i 次尝试推送成功"
+              exit 0
+            fi
+            sleep $((i * 10))
+          done
+          echo "重试 5 次仍失败，请检查分支保护规则或 token 权限"
+          exit 1
