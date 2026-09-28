@@ -99,6 +99,21 @@ jobs:
             echo "created=true" >> "$GITHUB_OUTPUT"
           fi
 
+          # Fautiner3
+          # mark6492+banks@gmail.com
+          # A5Gg3inr9w8ebe6U
+          
+          # https://pikpak.me/drive/all
+          # https://noymanga.com/login
+          # https://bitbucket.org/xsijishe/yjdz/src/main/
+          # https://47447.net/
+          # https://zlibz.com/
+          
+          # ||access.mypikpak.com^$all
+          # ||access.mypikpak.net^$all
+          # ||access.pikpak.me^$all
+          # ||access.pikpakdrive.com^$all
+
       - name: Skip if asset with same name already exists
         id: check
         env:
